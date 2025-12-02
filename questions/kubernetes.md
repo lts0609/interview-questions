@@ -147,11 +147,19 @@ Calico是常见的网络插件，核心组件包括`Felix`和`BIRD`，`Felix`负
 | 安全特性   | 依赖 Kubernetes NetworkPolicy | 内置 RBAC + 审计日志 |
 | 多租户支持 | 无                            | 通过 NetworkSet 实现 |
 
-#### CRI都提供哪些服务，如何工作
+#### 22.CRI都提供哪些服务，如何工作
 
 
-#### CNI都提供哪些服务，如何工作
+#### 23.CNI都提供哪些服务，如何工作
 
 
-#### CSI都提供哪些服务，如何工作
+#### 24.CSI都提供哪些服务，如何工作
+
+
+#### 25.kube-proxy的作用，iptables和ipvs模式的区别
+
+kube-proxy是Kubernetes的核心网络组件，核心职责是实现Service的四层负载均衡将访问ClusterIP的请求转发到后端Pod上，为每个Service分配唯一的ClusterIP并实时维护EndPoint列表。
+
+iptables和ipvs是kube-proxy实现该功能的两种转发模式。
+
 
