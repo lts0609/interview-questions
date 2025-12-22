@@ -158,9 +158,99 @@ Calico是常见的网络插件，核心组件包括`Felix`和`BIRD`，`Felix`负
 
 #### 25.kube-proxy的作用，iptables和ipvs模式的区别
 
-kube-proxy是Kubernetes的核心网络组件，核心职责是实现Service的四层负载均衡将访问ClusterIP的请求转发到后端Pod上，为每个Service分配唯一的ClusterIP并实时维护EndPoint列表。
+**kube-proxy的作用**：
 
-iptables和ipvs是kube-proxy实现该功能的两种转发模式。
+kube-proxy是Kubernetes集群中每个节点上运行的网络代理组件，是Service功能的核心实现，主要职责包括：
 
-iptables是内核netfilter框架中的功能，包含filter/nat//raw四个table，每个表中包含预定义链和自定义链的规则，预定义链包含prerouting/postrouting/input/output/forward。创建service会时kube-proxy会创建对应的iptables规则，当规则数量过多时由于每次修改都需要整体重载规则会造成性能抖动，链式匹配也会影响service性能，所以大规模集群不建议使用iptables模式。
+1. **Service代理**：实现Service的ClusterIP到后端Pod的流量转发，提供四层负载均衡功能；
 
+2. **规则维护**：监听Service和Endpoint对象的变化，动态更新节点上的网络转发规则；
+
+3. **会话保持**：支持SessionAffinity，确保来自同一客户端的请求转发到同一个后端Pod；
+
+**iptables模式**：
+
+iptables是内核Netfilter框架提供功能。
+
+**工作原理**：
+
+1. **表结构**：iptables包含四个表：
+* `filter`：包过滤
+* `nat`：地址转换
+* `mangle`：包修改
+* `raw`：连接跟踪
+
+2. **链结构**：每个表包含预定义链和自定义链：
+* 预定义链：`PREROUTING`、`POSTROUTING`、`INPUT`、`OUTPUT`、`FORWARD`
+* 自定义链：kube-proxy为每个Service创建自定义链，如`KUBE-SVC-xxx`、`KUBE-SEP-xxx`
+
+3. **规则生成**：
+* 当创建Service时，kube-proxy在`nat`表的`OUTPUT`和`PREROUTING`链中添加规则
+* 为每个Service创建`KUBE-SVC-xxx`链，实现负载均衡
+* 为每个Endpoint创建`KUBE-SEP-xxx`链，指向具体的Pod IP和端口
+* 使用随机算法在多个Endpoint之间选择
+
+**缺点**：
+- **性能问题**：规则数量多时，iptables采用链式匹配，需要遍历规则链，时间复杂度O(n)
+- **更新开销**：每次Service或Endpoint变化，需要重新加载整个iptables规则集，可能导致短暂的服务中断
+- **规则膨胀**：大规模集群中规则数量可能达到数万条，影响性能
+- **不支持高级负载均衡算法**：只支持随机选择，不支持加权轮询、最少连接等
+
+**IPVS模式**：
+
+IPVS（IP Virtual Server）是Linux内核提供的基于Netfilter的负载均衡功能，专门为高性能负载均衡设计。
+
+**工作原理**：
+
+1. **核心概念**：
+* **Virtual Server（VS）**：对应Kubernetes的Service，使用ClusterIP和端口
+* **Real Server（RS）**：对应Kubernetes的Pod，使用Pod IP和端口
+
+2. **工作流程**：
+* kube-proxy监听API Server，当Service或Endpoint变化时，调用ipvsadm命令更新ipvs规则
+* 创建Virtual Server（对应Service的ClusterIP）
+* 添加Real Server（对应后端Pod）
+* 配置调度算法和会话保持
+
+3. **支持的调度算法**：
+* `rr`（Round Robin）：轮询
+* `lc`（Least Connection）：最少连接
+* `dh`（Destination Hashing）：目标地址哈希
+* `sh`（Source Hashing）：源地址哈希
+* `sed`（Shortest Expected Delay）：最短预期延迟
+* `nq`（Never Queue）：永不排队
+
+4. **数据转发**：
+
+ipvs工作在Netfilter的`INPUT`链，使用哈希表查找，时间复杂度O(1)
+
+支持三种转发模式：
+* **NAT模式**：修改数据包的源/目标IP和端口（默认）
+* **Tunneling模式**：使用IPIP隧道封装
+* **Direct Routing模式**：直接路由，性能最高但需要配置
+
+**优点**：
+- **高性能**：使用哈希表查找，时间复杂度O(1)，性能远高于iptables
+- **支持多种调度算法**：提供丰富的负载均衡算法选择
+- **规则更新效率高**：只更新变化的规则，无需重载整个规则集
+- **适合大规模集群**：可以支持数万个Service和Endpoint
+- **更好的连接跟踪**：ipvs的连接跟踪机制更高效
+
+**缺点**：
+- 需要加载ipvs内核模块（ip_vs、ip_vs_rr、ip_vs_wrr、ip_vs_sh等）
+- 某些云环境可能不支持ipvs模块
+- 配置相对复杂
+
+**对比**：
+
+| 维度 | iptables模式 | ipvs模式 |
+|------|-------------|----------|
+| **查找性能** | O(n)链式匹配 | O(1)哈希表查找 |
+| **规则更新** | 需要重载整个规则集 | 只更新变化的规则 |
+| **负载均衡算法** | 仅随机选择 | 支持rr、lc、dh、sh等多种算法 |
+| **规则数量限制** | 大规模集群性能下降明显 | 可支持数万条规则 |
+| **内核依赖** | 无需额外模块（系统自带） | 需要加载ipvs内核模块 |
+| **适用场景** | 中小规模集群（<1000节点） | 大规模集群（>1000节点） |
+| **性能** | 中等 | 高 |
+| **稳定性** | 高 | 高 |
+| **资源消耗** | 规则多时CPU消耗高 | CPU消耗低 |
