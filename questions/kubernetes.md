@@ -162,4 +162,5 @@ kube-proxy是Kubernetes的核心网络组件，核心职责是实现Service的�
 
 iptables和ipvs是kube-proxy实现该功能的两种转发模式。
 
+iptables是内核netfilter框架中的功能，包含filter/nat//raw四个table，每个表中包含预定义链和自定义链的规则，预定义链包含prerouting/postrouting/input/output/forward。创建service会时kube-proxy会创建对应的iptables规则，当规则数量过多时由于每次修改都需要整体重载规则会造成性能抖动，链式匹配也会影响service性能，所以大规模集群不建议使用iptables模式。
 
