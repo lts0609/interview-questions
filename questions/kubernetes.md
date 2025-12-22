@@ -162,15 +162,15 @@ Calico是常见的网络插件，核心组件包括`Felix`和`BIRD`，`Felix`负
 
 kube-proxy是Kubernetes集群中每个节点上运行的网络代理组件，是Service功能的核心实现，主要职责包括：
 
-1. **Service代理**：实现Service流量到后端Pod的转发，提供四层负载均衡功能；
-
-2. **规则维护**：监听Service和Endpoint对象的变化，动态更新节点上的网络转发规则；
-
-3. **会话保持**：支持SessionAffinity会话亲和性；
+1. Service流量代理：将访问Service的ClusterIP/NodePort/LoadBalancer的流量，转发到后端对应的Pod（通过Endpoint匹配），提供四层负载均衡。 
+2. 转发规则动态维护：实时监听API Server中Service和Endpoint的创建/更新/删除事件，动态同步更新节点上的网络转发规则（iptables规则或ipvs规则），保证规则与集群状态一致。
+3. 会话亲和性支持：支持SessionAffinity（会话亲和性），默认是None（无亲和性）；当配置为ClientIP模式时，可确保同一客户端IP的请求持续转发到同一个后端Pod。
 
 **iptables模式**：
 
 **工作原理**：
+
+依赖Linux内核Netfilter框架的iptables功能，通过“表-链-规则”的层级结构实现流量转发
 
 1. **表结构**：iptables包含四个表：
 * `filter`：包过滤
@@ -186,10 +186,11 @@ kube-proxy是Kubernetes集群中每个节点上运行的网络代理组件，是
 * 当创建Service时，kube-proxy在`nat`表的`OUTPUT`和`PREROUTING`链中添加规则，Pod访问ClusterIP新增`OUTPUT`链规则，外部访问CLusterIP新增`PREROUTING`链规则
 * 为每个Service创建`KUBE-SVC-xxx`链，实现负载均衡
 * 为每个Endpoint创建`KUBE-SEP-xxx`链，指向具体的Pod IP和端口
+* 当流量匹配Service地址时，先进入KUBE-SVC-xxx链，通过算法选择一个KUBE-SEP-xxx链，最终转发到目标Pod。
 
 **缺点**：
 - **性能问题**：规则数量多时，iptables采用链式匹配，需要遍历规则链，时间复杂度O(n)
-- **更新开销**：每次Service或Endpoint变化，需要重新加载整个iptables规则集(待确认)，导致网络性能抖动
+- **更新开销**：每次Service或Endpoint变化，旧版需要重新加载整个iptables规则集会导致网络性能抖动，现在已经是增量修改但仍可能存在iptables规则锁竞争带来的性能影响
 - **规则膨胀**：大规模集群中规则数量可能达到数万条，影响性能
 - **不支持高级负载均衡算法**：只支持random和rr算法
 
@@ -238,12 +239,13 @@ ipvs使用哈希表查找，时间复杂度O(1)
 
 **对比**：
 
-| 维度 | iptables模式                  | ipvs模式 |
-|------|-----------------------------|----------|
-| **查找性能** | O(n)链式匹配                    | O(1)哈希表查找 |
-| **规则更新** | 需要重载整个规则集                   | 只更新变化的规则 |
-| **负载均衡算法** | 仅支持random、rr                | 支持rr、lc、dh、sh等多种算法 |
-| **规则数量限制** | 大规模Service/EndPoint场景性能下降明显 | 可支持数万条规则 |
-| **内核依赖** | 无需额外模块（系统自带）                | 需要加载ipvs内核模块 |
-| **适用场景** | 中小规模集群（<1000节点）             | 大规模集群（>1000节点） |
-| **性能** | 中等                          | 高 |
+| 维度         | iptables模式               | ipvs模式             |
+|------------|--------------------------|--------------------|
+| **查找性能**   | O(n)链式匹配                 | O(1)哈希表查找          |
+| **规则更新**   | 需要重载整个规则集                | 只更新变化的规则           |
+| **负载均衡算法** | 仅支持random、rr             | 支持rr、lc、dh、sh等多种算法 |
+| **转发模式**   | 仅NAT                     | 支持NAT、Tunneling、DR |
+| **规则数量限制** | 大规模Service/EndPoint场景性能下降明显 | 可支持数万条规则           |
+| **内核依赖**   | 无需额外模块（系统自带）             | 需要加载ipvs内核模块       |
+| **适用场景**   | 中小规模集群（<1000节点）          | 大规模集群（>1000节点）     |
+| **性能**     | 中                        | 高                  |
