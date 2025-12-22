@@ -162,15 +162,13 @@ Calico是常见的网络插件，核心组件包括`Felix`和`BIRD`，`Felix`负
 
 kube-proxy是Kubernetes集群中每个节点上运行的网络代理组件，是Service功能的核心实现，主要职责包括：
 
-1. **Service代理**：实现Service的ClusterIP到后端Pod的流量转发，提供四层负载均衡功能；
+1. **Service代理**：实现Service流量到后端Pod的转发，提供四层负载均衡功能；
 
 2. **规则维护**：监听Service和Endpoint对象的变化，动态更新节点上的网络转发规则；
 
-3. **会话保持**：支持SessionAffinity，确保来自同一客户端的请求转发到同一个后端Pod；
+3. **会话保持**：支持SessionAffinity会话亲和性；
 
 **iptables模式**：
-
-iptables是内核Netfilter框架提供功能。
 
 **工作原理**：
 
@@ -185,20 +183,17 @@ iptables是内核Netfilter框架提供功能。
 * 自定义链：kube-proxy为每个Service创建自定义链，如`KUBE-SVC-xxx`、`KUBE-SEP-xxx`
 
 3. **规则生成**：
-* 当创建Service时，kube-proxy在`nat`表的`OUTPUT`和`PREROUTING`链中添加规则
+* 当创建Service时，kube-proxy在`nat`表的`OUTPUT`和`PREROUTING`链中添加规则，Pod访问ClusterIP新增`OUTPUT`链规则，外部访问CLusterIP新增`PREROUTING`链规则
 * 为每个Service创建`KUBE-SVC-xxx`链，实现负载均衡
 * 为每个Endpoint创建`KUBE-SEP-xxx`链，指向具体的Pod IP和端口
-* 使用随机算法在多个Endpoint之间选择
 
 **缺点**：
 - **性能问题**：规则数量多时，iptables采用链式匹配，需要遍历规则链，时间复杂度O(n)
-- **更新开销**：每次Service或Endpoint变化，需要重新加载整个iptables规则集，可能导致短暂的服务中断
+- **更新开销**：每次Service或Endpoint变化，需要重新加载整个iptables规则集(待确认)，导致网络性能抖动
 - **规则膨胀**：大规模集群中规则数量可能达到数万条，影响性能
-- **不支持高级负载均衡算法**：只支持随机选择，不支持加权轮询、最少连接等
+- **不支持高级负载均衡算法**：只支持random和rr算法
 
-**IPVS模式**：
-
-IPVS（IP Virtual Server）是Linux内核提供的基于Netfilter的负载均衡功能，专门为高性能负载均衡设计。
+**IPVS（IP Virtual Server）模式**：
 
 **工作原理**：
 
@@ -207,7 +202,7 @@ IPVS（IP Virtual Server）是Linux内核提供的基于Netfilter的负载均衡
 * **Real Server（RS）**：对应Kubernetes的Pod，使用Pod IP和端口
 
 2. **工作流程**：
-* kube-proxy监听API Server，当Service或Endpoint变化时，调用ipvsadm命令更新ipvs规则
+* kube-proxy监听API Server，当Service或Endpoint变化时，调用内核netlink接口更新ipvs规则
 * 创建Virtual Server（对应Service的ClusterIP）
 * 添加Real Server（对应后端Pod）
 * 配置调度算法和会话保持
@@ -222,10 +217,10 @@ IPVS（IP Virtual Server）是Linux内核提供的基于Netfilter的负载均衡
 
 4. **数据转发**：
 
-ipvs工作在Netfilter的`INPUT`链，使用哈希表查找，时间复杂度O(1)
+ipvs使用哈希表查找，时间复杂度O(1)
 
 支持三种转发模式：
-* **NAT模式**：修改数据包的源/目标IP和端口（默认）
+* **NAT模式**：修改数据包的源/目标IP和端口
 * **Tunneling模式**：使用IPIP隧道封装
 * **Direct Routing模式**：直接路由，性能最高但需要配置
 
@@ -237,20 +232,18 @@ ipvs工作在Netfilter的`INPUT`链，使用哈希表查找，时间复杂度O(1
 - **更好的连接跟踪**：ipvs的连接跟踪机制更高效
 
 **缺点**：
-- 需要加载ipvs内核模块（ip_vs、ip_vs_rr、ip_vs_wrr、ip_vs_sh等）
+- 需要加载额外内核模块
 - 某些云环境可能不支持ipvs模块
 - 配置相对复杂
 
 **对比**：
 
-| 维度 | iptables模式 | ipvs模式 |
-|------|-------------|----------|
-| **查找性能** | O(n)链式匹配 | O(1)哈希表查找 |
-| **规则更新** | 需要重载整个规则集 | 只更新变化的规则 |
-| **负载均衡算法** | 仅随机选择 | 支持rr、lc、dh、sh等多种算法 |
-| **规则数量限制** | 大规模集群性能下降明显 | 可支持数万条规则 |
-| **内核依赖** | 无需额外模块（系统自带） | 需要加载ipvs内核模块 |
-| **适用场景** | 中小规模集群（<1000节点） | 大规模集群（>1000节点） |
-| **性能** | 中等 | 高 |
-| **稳定性** | 高 | 高 |
-| **资源消耗** | 规则多时CPU消耗高 | CPU消耗低 |
+| 维度 | iptables模式                  | ipvs模式 |
+|------|-----------------------------|----------|
+| **查找性能** | O(n)链式匹配                    | O(1)哈希表查找 |
+| **规则更新** | 需要重载整个规则集                   | 只更新变化的规则 |
+| **负载均衡算法** | 仅支持random、rr                | 支持rr、lc、dh、sh等多种算法 |
+| **规则数量限制** | 大规模Service/EndPoint场景性能下降明显 | 可支持数万条规则 |
+| **内核依赖** | 无需额外模块（系统自带）                | 需要加载ipvs内核模块 |
+| **适用场景** | 中小规模集群（<1000节点）             | 大规模集群（>1000节点） |
+| **性能** | 中等                          | 高 |
