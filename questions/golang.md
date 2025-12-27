@@ -230,17 +230,18 @@ Go中的并发控制一般有三种模型 1.基于`channel`的并发控制 2.基
 
 #### 16.Context的用法和理解
 
-`Context`是Go语言中用于在`Goroutine树`中传递控制信号和数据的机制。`Context`是一个接口类型，包含`Done()`/`Err()`/`Value()`/`Deadline()`方法，Go中原生的实现类型包括`emptyCtx`/`cancelCtx`/`timerCtx`
+`Context`是Go语言中用于在`Goroutine树`中传递控制信号和数据的机制。主要包含两个功能: 
+
+1. 跨Goroutine传递控制信号：如取消信号、超时时间、截止时间，实现Goroutine的优雅退出。根`Context`的创建使用`Background()`方法；不确定使用哪种时使用`TODO()`作为占位；使用`WithCancel()`方法创建的`子Context`，在`父Context`的`Cancel()`方法被调用后也会收到`Done`取消信号；`WithTimeout()`方法会创建一个带有超时时间的`Context`；`WithDeadline()`会创建一个带有绝对截止时间的`Context`
+
+2. 跨Goroutine传递共享数据：在Goroutine树中传递少量、只读的共享值，使用`WithValue()`方法创建一个携带值的子`Context`
+
+`Context`底层是一个接口类型，包含`Done()`/`Err()`/`Value()`/`Deadline()`方法，Go中原生的实现类型包括`emptyCtx`/`cancelCtx`/`timerCtx`/`valueCtx`
 
 * emptyCtx: 是一个空结构，所有的接口方法都返回空，由`context.Background()`和`context.TODO()`创建的结构就是`emptyCtx`
 * cancelCtx: 结构中包含父级对象`context`、锁`mutex`、结束标识通道`done`、子级对象集合`children`和错误信息`err`
 * timerCtx: 是对`cancelCtx`的进一步封装，增加了`timer`和`deadline`两个定时结构
-* valueCtx：包含`context`和`key/value`，一个`valueCtx`中只包含一个键值对，查找时如果没有找到则会向父级继续匹配
-
-
-传递控制信号：根`Context`的创建使用`Background()`方法；不确定使用哪种时使用`TODO()`作为占位；使用`WithCancel()`方法创建的`子Context`在`父Context`的`Cancel()`方法被调用后也会收到`Done`取消信号；`WithTimeout()`方法会创建一个带有超时时间的`Context`；`WithDeadline()`会创建一个带有绝对截止时间的`Context`；
-
-传递数据：`WithValue()`用于创建一个携带值的`Context`，方便`Goroutine`获取共享的值;
+* valueCtx：包含`context`和`key/value`，一个`valueCtx`中只包含一个键值对，查找时如果没有找到则会向父级继续递归查找
 
 #### 17.GC机制和触发时机
 
