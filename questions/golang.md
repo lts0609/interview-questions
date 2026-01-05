@@ -115,7 +115,7 @@ channel是Go语言中的一种核心数据结构，主要用于Goroutine间的�
 
 ```Go
 type hchan struct {
-	// chan 里元素数量
+	// chan 中元素数量
 	qcount   uint
 	// chan 底层循环数组的长度
 	dataqsiz uint
@@ -276,6 +276,8 @@ Go的垃圾回收使用三色标记法，三色标记法将程序中的对象分
 
 优化：GC优化的核心在于减少STW的时间，可以通过避免频繁创建和销毁大量的临时对象和调整GC频率来优化。
 
+1.26待补充
+
 #### 18.两个Goroutine交替打印
 
 1.一个channel：两个goroutine创建后，向channel中写入数据，期望先打印的goroutine启动后读数据，后打印的启动后写数据，就实现了交替打印；
@@ -352,9 +354,9 @@ Signal：只会唤醒一个等待的`Goroutine`。
 
 #### 23.防止Goroutine超时怎么处理
 
-1.使用`time.After()`创建一个`case`；
+1.使用`time.After()`创建一个`case`通过`select`监听；
 
-2.使用带超时的`Context`，在其中设置超时时间；
+2.使用`context.WithTimeout()/context.WithDeadline()`创建带超时的上下文`timerCtx`，在其中设置超时/截止时间；
 
 #### 24.Go的栈增长机制，为什么Goroutine初始栈大小是2KB，而线程是MB级别
 
