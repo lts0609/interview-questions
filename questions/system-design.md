@@ -1,3 +1,11 @@
+# 设计一个像Twitter/Facebook一样的News Feed系统
+
+
+
+# 设计一个像TikTok一样的短视频平台
+
+
+
 #### 1.分布式环境下的唯一ID生成方案
 
 
