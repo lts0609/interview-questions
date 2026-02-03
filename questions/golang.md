@@ -6,7 +6,14 @@
 
 切片可以动态扩容，类型和长度无关，它的数据结构包括三个部分：1.指向底层数组的指针`array` 2.长度`len` 3.容量`cap` ，共3*8=24字节，初始化时使用`make`创建，而数组只能使用`new`创建。
 
-#### 2.切片的结构和扩容规则，操作后底层数组的变化
+```go
+type slice struct {
+	array unsafe.Pointer
+	len   int
+	cap   int
+}
+```
+#### 2.切片slice的结构和扩容规则，操作后底层数组的变化
 
 向切片中添加元素时，如果长度没有超过容量，则底层数组不会改变只是长度增加；如果超过容量发生扩容，会重新分配一块内存，然后把原数组的内容复制过来，再将新的元素添加。
 
@@ -14,6 +21,26 @@
 
 1.18版本后为了让切片扩容更加平滑，优化了扩容规则 1.双倍扩容：切片当前容量小于256时，容量直接翻倍 2.渐进式扩容：切片当前长度大于256时，新容量公式为`newcap += (newcap + 3*threshold) /4`，等价于扩容`1/4+192`。
 
+```go
+func nextslicecap(newLen, oldCap int) int {
+	newcap := oldCap
+	doublecap := newcap + newcap
+    // 1.18后阈值为256
+	const threshold = 256
+	if oldCap < threshold {
+		return doublecap
+	}
+	for {
+		// newcap = cap * (1+1/4) + (3*256)/4
+		newcap += (newcap + 3*threshold) >> 2
+		if uint(newcap) >= uint(newLen) {
+			break
+		}
+	}
+    
+	return newcap
+}
+```
 #### 3.map的结构和扩容原理
 
 ```Go
