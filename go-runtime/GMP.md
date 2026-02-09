@@ -570,9 +570,61 @@ func dropg() {
 
 ##### sched
 
+`sched`字段保存了G的寄存器状态。
+
+```Go
+type gobuf struct {
+  sp   uintptr        // 栈指针（Stack Pointer）
+  pc   uintptr        // 程序计数器（Program Counter）
+  g    guintptr       // 指向当前所属的G结构体
+  ctxt unsafe.Pointer // 通用上下文指针
+  lr   uintptr        // 链接寄存器（Link Register）
+  bp   uintptr        // 基指针（Base Pointer），仅用于启用帧指针的架构
+}
+```
+
+在进行G的切换时会进行状态保存，也就是把程序上下文存入`sched`字段，然后挂起这个G，等到它被重新调度时，执行`gogo()`从`sched`中恢复状态。
+
+```Go
+func save(pc, sp, bp uintptr) {
+	gp := getg()
+
+	if gp == gp.m.g0 || gp == gp.m.gsignal {
+		throw("save on system g not allowed")
+	}
+
+	gp.sched.pc = pc
+	gp.sched.sp = sp
+	gp.sched.lr = 0
+	gp.sched.bp = bp
+
+	if gp.sched.ctxt != nil {
+		badctxt()
+	}
+}
+```
+
 ##### schedlink
 
+在GMP模型中，存在如P的本地队列、全局队列等结构，`schedlink`就是G能被串联成链表的基础，作为 G 的成员字段无需为链表节点单独分配内存。关联结构包括`gQueue`和`gList`等，同一时刻一个G只能存在于`gQueue`或者`gList`之一中，其中`gQueue`仅用于P本地队列的实现，而`gList`是队列的通用基础结构。
+
+```Go
+// A G can only be on one gQueue or gList at a time.
+type gQueue struct {
+	head guintptr
+	tail guintptr
+	size int32
+}
+
+type gList struct {
+	head guintptr
+	size int32
+}
+```
+
 ##### lockedm
+
+某些情况下G和M存在强制绑定关系，这个关联也是双向的，和G中有M，M中有G的实现相同，M中也存在`lockedg`字段标识M锁定的G。
 
 #### 1.1.1.3 抢占相关标识字段
 
