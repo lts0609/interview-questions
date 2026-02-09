@@ -283,3 +283,18 @@ ipvs使用哈希表查找，时间复杂度O(1)
 
 
 #### 31.Kubernetes中存在哪几种负载均衡
+
+
+#### 32.Gateway和Ingress API有什么区别和优点
+
+Gateway和Ingress都是Kubernetes中用于流量管理的原生API，Gateway API作为下一代标准，解决Ingress API的一些设计问题。
+
+|   对比维度   |                        Ingress API                        |                         Gateway API                          |
+|:--------:| :-------------------------------------------------------: | :----------------------------------------------------------: |
+| **核心定位** |     Kubernetes 早期通用 HTTP/HTTPS 入口标准，功能极简     |     下一代**标准化、全场景、可扩展**的南北向流量网关标准     |
+| **架构模型** |          单层资源（Ingress），模型简单但能力受限          |   分层模型：GatewayClass → Gateway → HTTPRoute/TCPRoute 等   |
+| **职责分工** |               运维、开发、基础设施职责耦合                |    **严格解耦**： infra 运维管 Gateway，业务开发管 Route     |
+| **流量类型** |      仅原生支持 L7（HTTP/HTTPS），TCP/UDP 靠私有扩展      |      **原生支持 L4 + L7**：TCP/UDP/TLS/HTTP/gRPC/HTTP2       |
+| **流量治理** | 仅基础 Host/Path 路由；高级能力靠 Annotation 实现，无标准 | 原生内置：权重路由、流量拆分、镜像、重写、重试、超时、熔断等 |
+| **扩展机制** |         基于 Annotation，各实现不兼容，厂商绑定强         |     基于**标准 CRD 扩展点**，跨实现行为一致，无私有注解      |
+| **多租户**  |                   支持差，权限难以隔离                    |            原生支持 RBAC、多租户、多团队权限隔离             |
