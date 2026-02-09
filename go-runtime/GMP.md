@@ -138,7 +138,7 @@ type g struct {
 
 #### 1.1.1.1 栈相关字段
 
-栈是 Goroutine 执行代码的内存载体,这部分字段控制栈增长、抢占触发、系统栈/用户栈区分。
+栈是Goroutine执行代码的内存载体,这部分字段控制栈增长、抢占触发、系统栈/用户栈区分。
 
 |    字段     |  类型   |                     核心含义                     |                             作用                             |
 | :---------: | :-----: | :----------------------------------------------: | :----------------------------------------------------------: |
@@ -286,7 +286,7 @@ const (
 
 下面对于0-9的基础状态做出说明：
 
-|     状态常量      | 数值 |                       核心含义                        |                 关键特征（调度 / 栈 / 队列）                 |
+|     状态常量      | 数值 |                       核心含义                        |                           关键特征                           |
 | :---------------: | :--: | :---------------------------------------------------: | :----------------------------------------------------------: |
 |      _Gidle       |  0   |                       刚分配的G                       |        无栈、不在任何队列、无M/P绑定、仅内存分配完成         |
 |    _Grunnable     |  1   | 可运行状态，在调度队列（P 本地 / 全局队列）中等待执行 |          有栈、在调度队列、无M/P绑定、仅等待被调度           |
@@ -298,6 +298,16 @@ const (
 | _Genqueue_unused  |  7   |                       废弃状态                        |                              无                              |
 |    _Gcopystack    |  8   |            栈正在被拷贝（扩容/收缩/移动）             |  无执行、不在调度队列、栈被 runtime 独占、完成后恢复原状态   |
 |    _Gpreempted    |  9   |                      被动抢占态                       |         不在调度队列、经CAS转为`_Gwaiting`后等待唤醒         |
+
+`_Gscan` 是位掩码（0x1000），不是独立状态，而是叠加在基础状态上的标记，标识 GC 正在扫描该 G 的栈，下面对于叠加状态状态做出说明：
+
+|    叠加态常量     |  数值  |  对应基础态   |                  核心含义                  |            关键特征             |
+| :---------------: | :----: | :-----------: | :----------------------------------------: | :-----------------------------: |
+| `_Gscanrunnable`  | 0x1001 | `_Grunnable`  |          GC 扫描 “可运行 G” 的栈           | 扫描时 G 仍在调度队列，暂停出队 |
+|  `_Gscanrunning`  | 0x1002 |  `_Grunning`  | GC 通知运行中的 G 自行扫描栈（特殊叠加态） | G 仍在执行，仅短暂阻塞状态变更  |
+|  `_Gscansyscall`  | 0x1003 |  `_Gsyscall`  |        GC 扫描 “系统调用中 G” 的栈         |  系统调用暂停，扫描完成后恢复   |
+|  `_Gscanwaiting`  | 0x1004 |  `_Gwaiting`  |          GC 扫描 “阻塞态 G” 的栈           |    阻塞状态不变，扫描后恢复     |
+| `_Gscanpreempted` | 0x1009 | `_Gpreempted` |          GC 扫描 “被抢占 G” 的栈           |    抢占状态不变，扫描后恢复     |
 
 ###### 状态转换过程
 
@@ -503,13 +513,6 @@ func suspendG(gp *g) suspendGState {
 			}
 		}
 
-		// TODO: Don't busy wait. This loop should really only
-		// be a simple read/decide/CAS loop that only fails if
-		// there's an active race. Once the CAS succeeds, we
-		// should queue up the preemption (which will require
-		// it to be reliable in the _Grunning case, not
-		// best-effort) and then sleep until we're notified
-		// that the goroutine is suspended.
 		if i == 0 {
 			nextYield = nanotime() + yieldDelay
 		}
@@ -533,3 +536,543 @@ func suspendG(gp *g) suspendGState {
 这里面有一个比较特殊的分支即`_Grunning`，从上面的源码中可以看到，这个case中会先把`_Grunning`转换成`_Gscanrunning`临时锁定，然后对`g.stackguard0`设置抢占标记，再恢复到`_Grunning`状态。后续就和`sysmon`触发的被动抢占一样，G运行到安全点后栈检查时设置为`_Gpreempted`。
 
 这部分属于逻辑的复用但是目标不同，被动抢占是为了公平调度，而GC时触发的抢占是为了能够进行栈扫描。
+
+##### m
+
+在G和M是在runtime中是双向关联的的，M结构体中存了G的指针，G的结构体也存了对应M的指针。
+
+```Go
+func execute(gp *g, inheritTime bool) {
+	mp := getg().m
+
+	// 绑定M和G
+	mp.curg = gp
+  // 绑定G和M
+	gp.m = mp
+	gp.syncSafePoint = false // Clear the flag, which may have been set by morestack.
+	casgstatus(gp, _Grunnable, _Grunning)
+	gp.waitsince = 0
+	gp.preempt = false
+	gp.stackguard0 = gp.stack.lo + stackGuard
+	......
+}
+```
+
+```Go
+func dropg() {
+	gp := getg()
+	// 没有写屏障地解除G对M的绑定
+	setMNoWB(&gp.m.curg.m, nil)
+  // 没有写屏障地解除M对G的绑定
+	setGNoWB(&gp.m.curg, nil)
+}
+```
+
+##### sched
+
+##### schedlink
+
+##### lockedm
+
+#### 1.1.1.3 抢占相关标识字段
+
+辅助控制抢占流程,区分抢占类型、触发栈优化,是 1.14+ 被动抢占的关键辅助字段。
+
+|      字段      | 类型 |             核心含义              |                             作用                             |
+| :------------: | :--: | :-------------------------------: | :----------------------------------------------------------: |
+|    preempt     | bool |             抢占信号              |      抢占标记：与`stackguard0`字段同步设置，标记G待抢占      |
+|  preemptStop   | bool | 抢占时是否转为 `_Gpreempted` 状态 | 抢占行为控制：true为被动抢占，后续转为 `_Gpreempted`，false 为主动让出，后续转为 `_Grunnable` |
+| preemptShrink  | bool |      是否在同步安全点收缩栈       |         内存优化：若该值为true，抢占时调度器会收缩栈         |
+| asyncSafePoint | bool |        G是否停在异步安全点        |           抢占安全：`preemptPark()` 中会校验该字段           |
+
+其中的`preempt`和`stackguard0`设置可在抢占的核心函数`preemptone()`中看到：
+
+```Go
+func preemptone(pp *p) bool {
+	mp := pp.m.ptr()
+	if mp == nil || mp == getg().m {
+		return false
+	}
+	gp := mp.curg
+	if gp == nil || gp == mp.g0 {
+		return false
+	}
+	// 设置抢占相关标识
+	gp.preempt = true
+	gp.stackguard0 = stackPreempt
+
+	// Request an async preemption of this P.
+	if preemptMSupported && debug.asyncpreemptoff == 0 {
+		pp.preempt = true
+		preemptM(mp)
+	}
+
+	return true
+}
+```
+
+`preemptStop`字段仅会在`suspendG()`中的`_Grunning`分支才会被设置为true，表示强制**被动抢占**，即GC时为了STW强制停止正在运行的G。`asyncPreempt2()`中也是根据该字段选择对应的抢占逻辑，值为true的**被动抢占**后面状态会被修改为`_Gpreempted`，值为false对应的**主动让出**状态会被修改为`_Grunnable`。这部分逻辑名为抢占，但实际上描述的是G与M的解绑，然后资源的重新调度。
+
+```Go
+func asyncPreempt2() {
+	gp := getg()
+	gp.asyncSafePoint = true
+	if gp.preemptStop {
+    // 被动
+		mcall(preemptPark)
+	} else {
+    // 主动
+		mcall(gopreempt_m)
+	}
+	gp.asyncSafePoint = false
+}
+```
+
+`asyncSafePoint`字段用于标识G是否处在异步抢占安全点，Go 的安全点分两类：
+
+1. 主动安全点：G主动进入（如函数调用边界、循环回边、channel 操作）；
+2. 异步安全点：G被信号（SIGURG）打断后被动进入（即`asyncPreempt2()`触发的场景）；
+
+#### 1.1.1.4 阻塞/等待相关字段
+
+|      字段       |     类型      |           核心含义           |                     GMP 视角 & 关联流程                      |
+| :-------------: | :-----------: | :--------------------------: | :----------------------------------------------------------: |
+|   `waitsince`   |    `int64`    |    G进入阻塞状态的时间戳     |        监控分析：调度器统计阻塞时长,检测长时间阻塞的G        |
+|  `waitreason`   | `waitReason`  |         G阻塞的原因          | 语义区分：调度器/监控工具（pprof/trace）区分阻塞类型（IO/Mutex/Channel）,优化调度策略 |
+|    `waiting`    |   `*sudog`    |    G等待的 `sudog` 结构体    | 同步原语绑定：G等待Channel/Mutex时,`sudog` 挂到该字段,转为 `_Gwaiting` |
+| `parkingOnChan` | `atomic.Bool` | G是否即将在channel操作中挂起 | 栈安全：标记通道阻塞前置状态,避免栈收缩时修改通道相关栈数据（不安全），值为 `true` 时延迟栈收缩直到G解除阻塞 |
+
+#### 1.1.1.5 GC / 安全点相关字段（GC 协作）
+
+配合 GC 执行,保证 GC 扫描的准确性、安全性,是 Go 垃圾回收的核心辅助字段。
+
+|      字段       |   类型   |                核心含义                |                     GMP 视角 & 关联流程                      |
+| :-------------: | :------: | :------------------------------------: | :----------------------------------------------------------: |
+|   `stackLock`   | `uint32` |     栈修改锁（保护栈不被并发修改）     | - **GC / 采样安全**：GC 扫描栈、sigprof 采样时加锁,避免栈扩容 / 收缩导致数据错乱；扫描完成后解锁。 |
+|  `gcscandone`   |  `bool`  |       G 的栈是否已被 GC 扫描完成       | - **GC 标记**：GC 扫描完栈后置 `true`；G 被抢占时,需等待扫描完成再调度。 |
+| `gcAssistBytes` | `int64`  |      G 的 GC 辅助信用值（字节数）      | - **内存分配控制**：`>0` 可直接分配内存,`<0` 需先执行 GC 扫描工作偿还 “债务”；- **调度优先级**：G 被调度时,先检查该值,有债务则先执行 GC 扫描,再执行业务逻辑。 |
+| `syncSafePoint` |  `bool`  | G 是否停在同步安全点（有精确指针信息） | - **GC 扫描**：同步安全点的 G 可精确扫描栈指针,异步抢占的 G 需等待到同步安全点再扫描。 |
+
+#### 1.1.1.6 调试 / 追踪 / 性能分析字段
+
+非核心但辅助排查问题、分析性能,是调试 Goroutine 问题的关键依据。
+
+|                          字段                           |             类型              |           核心含义           |                           关联场景                           |
+| :-----------------------------------------------------: | :---------------------------: | :--------------------------: | :----------------------------------------------------------: |
+|                         `goid`                          |           `uint64`            | G 的唯一标识（Goroutine ID） |   调试（`runtime.Stack()`）、日志、trace 工具区分不同 G。    |
+| `tracking`/`trackingSeq`/`trackingStamp`/`runnableTime` |          布尔 / 整型          |       调度延迟统计相关       | 调度器统计 G 从 `_Grunnable` 到 `_Grunning` 的时长,优化调度策略。 |
+|                         `trace`                         |         `gTraceState`         |        Per-G 追踪状态        | `runtime/trace` 工具记录 G 的调度、抢占、阻塞事件,生成可视化轨迹。 |
+|                   `goroutineProfiled`                   | `goroutineProfileStateHolder` |          栈分析状态          |    `pprof` 采集 Goroutine 栈信息时标记状态,避免重复采集。    |
+
+#### 1.1.1.7 其他辅助字段
+
+支撑 cgo、定时器、协程创建等边缘场景,非核心但保证 Goroutine 功能完整性。
+
+|              字段               |                   核心含义                   |                           关联场景                           |
+| :-----------------------------: | :------------------------------------------: | :----------------------------------------------------------: |
+| `syscallsp/syscallpc/syscallbp` |         G 执行系统调用时的 SP/PC/BP          |     GC 扫描系统调用的栈上下文（G 处于 `_Gsyscall` 时）。     |
+|             `param`             |                 通用参数指针                 | 通道唤醒时传递 `sudog`、debugCall 传递参数、GC 辅助传递状态。 |
+|       `timer`/`sleepWhen`       |     `time.Sleep` 的缓存定时器 / 唤醒时间     | G 执行 `time.Sleep` 时,定时器触发后将 G 转为 `_Grunnable`。  |
+|  `parentGoid`/`gopc`/`startpc`  | 父 G ID / 创建 G 的 go 语句 PC/G 入口函数 PC |         调试时追溯 Goroutine 的创建来源、执行入口。          |
+|            `cgoCtxt`            |                cgo 回溯上下文                |             cgo 调用的栈回溯,排查 cgo 相关问题。             |
+
+------
+
+## 
+
+### 1.1.2 M的实现
+
+```Go
+type m struct {
+	g0      *g     // goroutine with scheduling stack
+	morebuf gobuf  // gobuf arg to morestack
+	divmod  uint32 // div/mod denominator for arm - known to liblink (cmd/internal/obj/arm/obj5.go)
+
+	// Fields not known to debuggers.
+	procid          uint64            // for debuggers, but offset not hard-coded
+	gsignal         *g                // signal-handling g
+	goSigStack      gsignalStack      // Go-allocated signal handling stack
+	sigmask         sigset            // storage for saved signal mask
+	tls             [tlsSlots]uintptr // thread-local storage (for x86 extern register)
+	mstartfn        func()
+	curg            *g       // current running goroutine
+	caughtsig       guintptr // goroutine running during fatal signal
+	p               puintptr // attached p for executing go code (nil if not executing go code)
+	nextp           puintptr
+	oldp            puintptr // the p that was attached before executing a syscall
+	id              int64
+	mallocing       int32
+	throwing        throwType
+	preemptoff      string // if != "", keep curg running on this m
+	locks           int32
+	dying           int32
+	profilehz       int32
+	spinning        bool // m is out of work and is actively looking for work
+	blocked         bool // m is blocked on a note
+	newSigstack     bool // minit on C thread called sigaltstack
+	printlock       int8
+	incgo           bool          // m is executing a cgo call
+	isextra         bool          // m is an extra m
+	isExtraInC      bool          // m is an extra m that does not have any Go frames
+	isExtraInSig    bool          // m is an extra m in a signal handler
+	freeWait        atomic.Uint32 // Whether it is safe to free g0 and delete m (one of freeMRef, freeMStack, freeMWait)
+	needextram      bool
+	g0StackAccurate bool // whether the g0 stack has accurate bounds
+	traceback       uint8
+	allpSnapshot    []*p          // Snapshot of allp for use after dropping P in findRunnable, nil otherwise.
+	ncgocall        uint64        // number of cgo calls in total
+	ncgo            int32         // number of cgo calls currently in progress
+	cgoCallersUse   atomic.Uint32 // if non-zero, cgoCallers in use temporarily
+	cgoCallers      *cgoCallers   // cgo traceback if crashing in cgo call
+	park            note
+	alllink         *m // on allm
+	schedlink       muintptr
+	lockedg         guintptr
+	createstack     [32]uintptr // stack that created this thread, it's used for StackRecord.Stack0, so it must align with it.
+	lockedExt       uint32      // tracking for external LockOSThread
+	lockedInt       uint32      // tracking for internal lockOSThread
+	mWaitList       mWaitList   // list of runtime lock waiters
+
+	mLockProfile mLockProfile // fields relating to runtime.lock contention
+	profStack    []uintptr    // used for memory/block/mutex stack traces
+
+	// wait* are used to carry arguments from gopark into park_m, because
+	// there's no stack to put them on. That is their sole purpose.
+	waitunlockf          func(*g, unsafe.Pointer) bool
+	waitlock             unsafe.Pointer
+	waitTraceSkip        int
+	waitTraceBlockReason traceBlockReason
+
+	syscalltick uint32
+	freelink    *m // on sched.freem
+	trace       mTraceState
+
+	// these are here because they are too large to be on the stack
+	// of low-level NOSPLIT functions.
+	libcall    libcall
+	libcallpc  uintptr // for cpu profiler
+	libcallsp  uintptr
+	libcallg   guintptr
+	winsyscall winlibcall // stores syscall parameters on windows
+
+	vdsoSP uintptr // SP for traceback while in VDSO call (0 if not in call)
+	vdsoPC uintptr // PC for traceback while in VDSO call
+
+	// preemptGen counts the number of completed preemption
+	// signals. This is used to detect when a preemption is
+	// requested, but fails.
+	preemptGen atomic.Uint32
+
+	// Whether this is a pending preemption signal on this M.
+	signalPending atomic.Uint32
+
+	// pcvalue lookup cache
+	pcvalueCache pcvalueCache
+
+	dlogPerM
+
+	mOS
+
+	chacha8   chacha8rand.State
+	cheaprand uint64
+
+	// Up to 10 locks held by this m, maintained by the lock ranking code.
+	locksHeldLen int
+	locksHeld    [10]heldLockInfo
+}
+```
+
+
+
+### 1.1.3 P的实现
+
+```Go
+type p struct {
+	id          int32
+	status      uint32 // one of pidle/prunning/...
+	link        puintptr
+	schedtick   uint32     // incremented on every scheduler call
+	syscalltick uint32     // incremented on every system call
+	sysmontick  sysmontick // last tick observed by sysmon
+	m           muintptr   // back-link to associated m (nil if idle)
+	mcache      *mcache
+	pcache      pageCache
+	raceprocctx uintptr
+
+	deferpool    []*_defer // pool of available defer structs (see panic.go)
+	deferpoolbuf [32]*_defer
+
+	// Cache of goroutine ids, amortizes accesses to runtime·sched.goidgen.
+	goidcache    uint64
+	goidcacheend uint64
+
+	// Queue of runnable goroutines. Accessed without lock.
+	runqhead uint32
+	runqtail uint32
+	runq     [256]guintptr
+	// runnext, if non-nil, is a runnable G that was ready'd by
+	// the current G and should be run next instead of what's in
+	// runq if there's time remaining in the running G's time
+	// slice. It will inherit the time left in the current time
+	// slice. If a set of goroutines is locked in a
+	// communicate-and-wait pattern, this schedules that set as a
+	// unit and eliminates the (potentially large) scheduling
+	// latency that otherwise arises from adding the ready'd
+	// goroutines to the end of the run queue.
+	//
+	// Note that while other P's may atomically CAS this to zero,
+	// only the owner P can CAS it to a valid G.
+	runnext guintptr
+
+	// Available G's (status == Gdead)
+	gFree gList
+
+	sudogcache []*sudog
+	sudogbuf   [128]*sudog
+
+	// Cache of mspan objects from the heap.
+	mspancache struct {
+		// We need an explicit length here because this field is used
+		// in allocation codepaths where write barriers are not allowed,
+		// and eliminating the write barrier/keeping it eliminated from
+		// slice updates is tricky, more so than just managing the length
+		// ourselves.
+		len int
+		buf [128]*mspan
+	}
+
+	// Cache of a single pinner object to reduce allocations from repeated
+	// pinner creation.
+	pinnerCache *pinner
+
+	trace pTraceState
+
+	palloc persistentAlloc // per-P to avoid mutex
+
+	// Per-P GC state
+	gcAssistTime         int64 // Nanoseconds in assistAlloc
+	gcFractionalMarkTime int64 // Nanoseconds in fractional mark worker (atomic)
+
+	// limiterEvent tracks events for the GC CPU limiter.
+	limiterEvent limiterEvent
+
+	// gcMarkWorkerMode is the mode for the next mark worker to run in.
+	// That is, this is used to communicate with the worker goroutine
+	// selected for immediate execution by
+	// gcController.findRunnableGCWorker. When scheduling other goroutines,
+	// this field must be set to gcMarkWorkerNotWorker.
+	gcMarkWorkerMode gcMarkWorkerMode
+	// gcMarkWorkerStartTime is the nanotime() at which the most recent
+	// mark worker started.
+	gcMarkWorkerStartTime int64
+
+	// gcw is this P's GC work buffer cache. The work buffer is
+	// filled by write barriers, drained by mutator assists, and
+	// disposed on certain GC state transitions.
+	gcw gcWork
+
+	// wbBuf is this P's GC write barrier buffer.
+	//
+	// TODO: Consider caching this in the running G.
+	wbBuf wbBuf
+
+	runSafePointFn uint32 // if 1, run sched.safePointFn at next safe point
+
+	// statsSeq is a counter indicating whether this P is currently
+	// writing any stats. Its value is even when not, odd when it is.
+	statsSeq atomic.Uint32
+
+	// Timer heap.
+	timers timers
+
+	// Cleanups.
+	cleanups       *cleanupBlock
+	cleanupsQueued uint64 // monotonic count of cleanups queued by this P
+
+	// maxStackScanDelta accumulates the amount of stack space held by
+	// live goroutines (i.e. those eligible for stack scanning).
+	// Flushed to gcController.maxStackScan once maxStackScanSlack
+	// or -maxStackScanSlack is reached.
+	maxStackScanDelta int64
+
+	// gc-time statistics about current goroutines
+	// Note that this differs from maxStackScan in that this
+	// accumulates the actual stack observed to be used at GC time (hi - sp),
+	// not an instantaneous measure of the total stack size that might need
+	// to be scanned (hi - lo).
+	scannedStackSize uint64 // stack size of goroutines scanned by this P
+	scannedStacks    uint64 // number of goroutines scanned by this P
+
+	// preempt is set to indicate that this P should be enter the
+	// scheduler ASAP (regardless of what G is running on it).
+	preempt bool
+
+	// gcStopTime is the nanotime timestamp that this P last entered _Pgcstop.
+	gcStopTime int64
+
+	// Padding is no longer needed. False sharing is now not a worry because p is large enough
+	// that its size class is an integer multiple of the cache line size (for any of our architectures).
+}
+```
+
+### 1.1.4 调度器的实现
+
+```Go
+type schedt struct {
+	goidgen    atomic.Uint64
+	lastpoll   atomic.Int64 // time of last network poll, 0 if currently polling
+	pollUntil  atomic.Int64 // time to which current poll is sleeping
+	pollingNet atomic.Int32 // 1 if some P doing non-blocking network poll
+
+	lock mutex
+
+	// When increasing nmidle, nmidlelocked, nmsys, or nmfreed, be
+	// sure to call checkdead().
+
+	midle        muintptr // idle m's waiting for work
+	nmidle       int32    // number of idle m's waiting for work
+	nmidlelocked int32    // number of locked m's waiting for work
+	mnext        int64    // number of m's that have been created and next M ID
+	maxmcount    int32    // maximum number of m's allowed (or die)
+	nmsys        int32    // number of system m's not counted for deadlock
+	nmfreed      int64    // cumulative number of freed m's
+
+	ngsys atomic.Int32 // number of system goroutines
+
+	pidle        puintptr // idle p's
+	npidle       atomic.Int32
+	nmspinning   atomic.Int32  // See "Worker thread parking/unparking" comment in proc.go.
+	needspinning atomic.Uint32 // See "Delicate dance" comment in proc.go. Boolean. Must hold sched.lock to set to 1.
+
+	// Global runnable queue.
+	runq gQueue
+
+	// disable controls selective disabling of the scheduler.
+	//
+	// Use schedEnableUser to control this.
+	//
+	// disable is protected by sched.lock.
+	disable struct {
+		// user disables scheduling of user goroutines.
+		user     bool
+		runnable gQueue // pending runnable Gs
+	}
+
+	// Global cache of dead G's.
+	gFree struct {
+		lock    mutex
+		stack   gList // Gs with stacks
+		noStack gList // Gs without stacks
+	}
+
+	// Central cache of sudog structs.
+	sudoglock  mutex
+	sudogcache *sudog
+
+	// Central pool of available defer structs.
+	deferlock mutex
+	deferpool *_defer
+
+	// freem is the list of m's waiting to be freed when their
+	// m.exited is set. Linked through m.freelink.
+	freem *m
+
+	gcwaiting  atomic.Bool // gc is waiting to run
+	stopwait   int32
+	stopnote   note
+	sysmonwait atomic.Bool
+	sysmonnote note
+
+	// safePointFn should be called on each P at the next GC
+	// safepoint if p.runSafePointFn is set.
+	safePointFn   func(*p)
+	safePointWait int32
+	safePointNote note
+
+	profilehz int32 // cpu profiling rate
+
+	procresizetime int64 // nanotime() of last change to gomaxprocs
+	totaltime      int64 // ∫gomaxprocs dt up to procresizetime
+
+	customGOMAXPROCS bool // GOMAXPROCS was manually set from the environment or runtime.GOMAXPROCS
+
+	// sysmonlock protects sysmon's actions on the runtime.
+	//
+	// Acquire and hold this mutex to block sysmon from interacting
+	// with the rest of the runtime.
+	sysmonlock mutex
+
+	// timeToRun is a distribution of scheduling latencies, defined
+	// as the sum of time a G spends in the _Grunnable state before
+	// it transitions to _Grunning.
+	timeToRun timeHistogram
+
+	// idleTime is the total CPU time Ps have "spent" idle.
+	//
+	// Reset on each GC cycle.
+	idleTime atomic.Int64
+
+	// totalMutexWaitTime is the sum of time goroutines have spent in _Gwaiting
+	// with a waitreason of the form waitReasonSync{RW,}Mutex{R,}Lock.
+	totalMutexWaitTime atomic.Int64
+
+	// stwStoppingTimeGC/Other are distributions of stop-the-world stopping
+	// latencies, defined as the time taken by stopTheWorldWithSema to get
+	// all Ps to stop. stwStoppingTimeGC covers all GC-related STWs,
+	// stwStoppingTimeOther covers the others.
+	stwStoppingTimeGC    timeHistogram
+	stwStoppingTimeOther timeHistogram
+
+	// stwTotalTimeGC/Other are distributions of stop-the-world total
+	// latencies, defined as the total time from stopTheWorldWithSema to
+	// startTheWorldWithSema. This is a superset of
+	// stwStoppingTimeGC/Other. stwTotalTimeGC covers all GC-related STWs,
+	// stwTotalTimeOther covers the others.
+	stwTotalTimeGC    timeHistogram
+	stwTotalTimeOther timeHistogram
+
+	// totalRuntimeLockWaitTime (plus the value of lockWaitTime on each M in
+	// allm) is the sum of time goroutines have spent in _Grunnable and with an
+	// M, but waiting for locks within the runtime. This field stores the value
+	// for Ms that have exited.
+	totalRuntimeLockWaitTime atomic.Int64
+}
+
+```
+
+## 1.2 核心函数
+
+### 1.2.1 getg()
+
+
+
+### 1.2.2 newproc()
+
+
+
+
+
+1.2.3 acquireg()
+
+
+
+1.2.4 dropg()
+
+### 1.2.3 goready()
+
+
+
+### 1.2.4 gopark()
+
+
+
+### 1.2.5 drop()
+
+
+
+
+
+### 
+
+
+
