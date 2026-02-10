@@ -624,7 +624,7 @@ type gList struct {
 
 ##### lockedm
 
-某些情况下G和M存在强制绑定关系，这个关联也是双向的，和G中有M，M中有G的实现相同，M中也存在`lockedg`字段标识M锁定的G。
+某些情况下G和M存在强制绑定关系，这个关联也是双向的，和G的结构中包含M的指针，M的结构中也包含G的指针相同，M的结构中也同样存在一个`lockedg`字段标识M锁定的G进行双向关联。
 
 #### 1.1.1.3 抢占相关标识字段
 
@@ -636,6 +636,8 @@ type gList struct {
 |  preemptStop   | bool | 抢占时是否转为 `_Gpreempted` 状态 | 抢占行为控制：true为被动抢占，后续转为 `_Gpreempted`，false 为主动让出，后续转为 `_Grunnable` |
 | preemptShrink  | bool |      是否在同步安全点收缩栈       |         内存优化：若该值为true，抢占时调度器会收缩栈         |
 | asyncSafePoint | bool |        G是否停在异步安全点        |           抢占安全：`preemptPark()` 中会校验该字段           |
+
+##### preempt
 
 其中的`preempt`和`stackguard0`设置可在抢占的核心函数`preemptone()`中看到：
 
@@ -663,6 +665,29 @@ func preemptone(pp *p) bool {
 }
 ```
 
+##### preemptShrink
+
+`preemptShrink`字段的检查点在`newstack()`中，如果为true则立即进行栈收缩并修改标识位。
+
+```Go
+func newstack() {
+  ......
+if preempt {
+		......
+		if gp.preemptShrink {
+			// We're at a synchronous safe point now, so
+			// do the pending stack shrink.
+			gp.preemptShrink = false
+			shrinkstack(gp)
+		}
+  	......
+	}
+	......
+}
+```
+
+##### preemptStop
+
 `preemptStop`字段仅会在`suspendG()`中的`_Grunning`分支才会被设置为true，表示强制**被动抢占**，即GC时为了STW强制停止正在运行的G。`asyncPreempt2()`中也是根据该字段选择对应的抢占逻辑，值为true的**被动抢占**后面状态会被修改为`_Gpreempted`，值为false对应的**主动让出**状态会被修改为`_Grunnable`。这部分逻辑名为抢占，但实际上描述的是G与M的解绑，然后资源的重新调度。
 
 ```Go
@@ -679,6 +704,8 @@ func asyncPreempt2() {
 	gp.asyncSafePoint = false
 }
 ```
+
+##### asyncSafePoint
 
 `asyncSafePoint`字段用于标识G是否处在异步抢占安全点，Go 的安全点分两类：
 
